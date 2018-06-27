@@ -9,7 +9,7 @@ import lombok.RequiredArgsConstructor;
 import java.util.Optional;
 
 @RequiredArgsConstructor
-class Device extends AbstractActor {
+public class Device extends AbstractActor {
 
     private final LoggingAdapter log = Logging.getLogger(getContext().getSystem(), this);
     final String groupId;
@@ -53,9 +53,12 @@ class Device extends AbstractActor {
         public final String deviceId;
     }
 
-    @RequiredArgsConstructor
     public static final class ReadTemperature {
         long requestId;
+
+        public ReadTemperature(long requestId) {
+            this.requestId = requestId;
+        }
     }
 
     public static final class RespondTemperature {

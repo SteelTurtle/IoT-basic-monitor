@@ -7,22 +7,111 @@ import akka.actor.Terminated;
 import akka.event.Logging;
 import akka.event.LoggingAdapter;
 import lombok.RequiredArgsConstructor;
+import scala.concurrent.duration.FiniteDuration;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 @RequiredArgsConstructor
 public class DeviceGroup extends AbstractActor {
-    final String groupId;
-    //Keep track of all the devices manged by this DeviceGroup
-    final Map<String, ActorRef> deviceIdToActor = new HashMap<>();
-    // ...and another map to associate an ActorRef to a string, so a device cna
-    // be identified and terminated gracefully when it falls out of the group scope
-    final Map<ActorRef, String> actorToDeviceId = new HashMap<>();
     private final LoggingAdapter log = Logging.getLogger(getContext().getSystem(), this);
+
+    final String groupId;
 
     public static Props props(String groupId) {
         return Props.create(DeviceGroup.class, groupId);
+    }
+
+    private final Map<String, ActorRef> deviceIdToActor = new HashMap<>();
+    private final Map<ActorRef, String> actorToDeviceId = new HashMap<>();
+    private final long nextCollectionId = 0L;
+
+    private void onTrackDevice(DeviceManager.RequestTrackDevice trackMsg) {
+        if (this.groupId.equals(trackMsg.groupId)) {
+            ActorRef deviceActor = deviceIdToActor.get(trackMsg.deviceId);
+            if (deviceActor != null) {
+                deviceActor.forward(trackMsg, getContext());
+            } else {
+                log.info("Creating device actor for {}", trackMsg.deviceId);
+                deviceActor = getContext().actorOf(Device.props(groupId, trackMsg.deviceId), "device-" + trackMsg.deviceId);
+                deviceIdToActor.put(trackMsg.deviceId, deviceActor);
+                deviceActor.forward(trackMsg, getContext());
+            }
+        } else {
+            log.warning(
+                    "Ignoring TrackDevice request for {}. This actor is responsible for {}.",
+                    groupId, this.groupId
+            );
+        }
+    }
+
+    private void onAllTemperatures(RequestAllTemperatures r) {
+        // since Java collections are mutable, we want to avoid sharing them between actors (since multiple Actors (threads)
+        // modifying the same mutable data-structure is not safe), and perform a defensive copy of the mutable map:
+        //
+        // Feel free to use your favourite immutable data-structures library with Akka in Java applications!
+        Map<ActorRef, String> actorToDeviceIdCopy = new HashMap<>(this.actorToDeviceId);
+
+        getContext().actorOf(DeviceGroupQuery.props(
+                actorToDeviceIdCopy, r.requestId, getSender(), new FiniteDuration(3, TimeUnit.SECONDS)));
+    }
+
+    @Override
+    public Receive createReceive() {
+        return receiveBuilder()
+                .match(DeviceManager.RequestTrackDevice.class, this::onTrackDevice)
+                .match(Terminated.class, this::onTerminated)
+                .match(RequestAllTemperatures.class, this::onAllTemperatures)
+                .build();
+    }
+
+    public static interface TemperatureReading {
+    }
+
+    public static final class RequestDeviceList {
+        final long requestId;
+
+        public RequestDeviceList(long requestId) {
+            this.requestId = requestId;
+        }
+    }
+
+    public static final class ReplyDeviceList {
+        final long requestId;
+        final Set<String> ids;
+
+        public ReplyDeviceList(long requestId, Set<String> ids) {
+            this.requestId = requestId;
+            this.ids = ids;
+        }
+    }
+
+    public static final class RequestAllTemperatures {
+        final long requestId;
+
+        public RequestAllTemperatures(long requestId) {
+            this.requestId = requestId;
+        }
+    }
+
+    public static final class RespondAllTemperatures {
+        final long requestId;
+        final Map<String, TemperatureReading> temperatures;
+
+        public RespondAllTemperatures(long requestId, Map<String, TemperatureReading> temperatures) {
+            this.requestId = requestId;
+            this.temperatures = temperatures;
+        }
+    }
+
+    public static final class Temperature implements TemperatureReading {
+        public final double value;
+
+        public Temperature(double value) {
+            this.value = value;
+        }
     }
 
     @Override
@@ -35,24 +124,10 @@ public class DeviceGroup extends AbstractActor {
         log.info("DeviceGroup {} stopped", groupId);
     }
 
-    private void onTrackDevice(DeviceManager.RequestTrackDevice trackMsg) {
-        if (this.groupId.equals(trackMsg.groupId)) {
-            ActorRef deviceActor = deviceIdToActor.get(trackMsg.deviceId);
-            if (deviceActor != null) {
-                deviceActor.forward(trackMsg, getContext());
-            } else {
-                log.info("Creating device actor for {}", trackMsg.deviceId);
-                deviceActor = getContext().actorOf(Device.props(groupId, trackMsg.deviceId), "device-" + trackMsg.deviceId);
-                actorToDeviceId.put(deviceActor, trackMsg.deviceId);
-                deviceIdToActor.put(trackMsg.deviceId, deviceActor);
-                deviceActor.forward(trackMsg, getContext());
-            }
-        } else {
-            log.warning(
-                    "Ignoring TrackDevice request for {}. This actor is responsible for {}.",
-                    groupId, this.groupId
-            );
-        }
+    public static final class TemperatureNotAvailable implements TemperatureReading {
+    }
+
+    public static final class DeviceNotAvailable implements TemperatureReading {
     }
 
     private void onTerminated(Terminated t) {
@@ -63,11 +138,6 @@ public class DeviceGroup extends AbstractActor {
         deviceIdToActor.remove(deviceId);
     }
 
-    @Override
-    public Receive createReceive() {
-        return receiveBuilder()
-                .match(DeviceManager.RequestTrackDevice.class, this::onTrackDevice)
-                .match(Terminated.class, this::onTerminated)
-                .build();
+    public static final class DeviceTimedOut implements TemperatureReading {
     }
 }
